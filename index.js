@@ -69,6 +69,28 @@ function clearQrTimer(phoneNumber) {
     }
 }
 
+// Допоміжний метод: будуємо коректний JID для відправки у WhatsApp.
+// Коментар важливий, бо @lid часто ламає доставку для звичайних телефонних номерів.
+async function resolveRecipientJid(sock, to) {
+    const normalized = String(to).replace(/[^0-9]/g, '');
+    if (!normalized) {
+        throw new Error('Некоректний номер отримувача');
+    }
+
+    // Спочатку перевіряємо у WhatsApp наявність номера і беремо server із відповіді.
+    try {
+        const waResult = await sock.onWhatsApp(`${normalized}@s.whatsapp.net`);
+        if (Array.isArray(waResult) && waResult[0]?.exists && waResult[0]?.jid) {
+            return waResult[0].jid;
+        }
+    } catch (err) {
+        Logger.log(`Не вдалося перевірити onWhatsApp для ${normalized}: ${err.message}`, LogLevels.Warning, 'SendMsg');
+    }
+
+    // Якщо перевірка недоступна, використовуємо стандартний персональний JID.
+    return `${normalized}@s.whatsapp.net`;
+}
+
 // Основна функція створення/відновлення сесії
 async function createSession(phoneNumber, lineId, res = null) {
 
@@ -420,7 +442,8 @@ app.post('/sendmsg', async (req, res) => {
             return res.status(404).json({ status: 'error', message: 'Сесія не активна' });
         }
 
-        const jid = `${to}@lid`;
+        // Раніше тут був жорстко зашитий @lid; тепер визначаємо коректний JID динамічно.
+        const jid = await resolveRecipientJid(sock, to);
         let sentMessage;
 
         if (contentType === 'text') {
