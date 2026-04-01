@@ -123,6 +123,8 @@ async function createSession(phoneNumber, lineId, res = null) {
                 Logger.log(`Згенеровано QR-код для ${phoneNumber}`, LogLevels.Info, 'QR');
                 // зміна статусу сесії
                 setSessionHealthy(phoneNumber, false);
+                // Після генерації QR сесія не авторизована, тому hasUser = false.
+                setSessionHasUser(phoneNumber, false);
                 // Обмежуємо кількість спроб QR
                 const attempts = (qrTimers.get(phoneNumber + '_attempts') || 0) + 1;
                 qrTimers.set(phoneNumber + '_attempts', attempts);
@@ -139,12 +141,8 @@ async function createSession(phoneNumber, lineId, res = null) {
                 qrTimers.delete(phoneNumber + '_attempts'); // скидаємо лічильник
                 // зміна статусу сесії
                 setSessionHealthy(phoneNumber, true);
-                // Оновлюємо також наявність user
-                if (sock.user) {
-                    const current = sessionStatus.get(phoneNumber);
-                    current.hasUser = true;
-                    sessionStatus.set(phoneNumber, current);
-                }
+                // Фіксуємо наявність user одразу після успішного відкриття сесії.
+                setSessionHasUser(phoneNumber, !!sock.user);
 
                 Logger.log(`Сесія успішно підключена: ${phoneNumber}`, LogLevels.Success, 'Connection');
                 if (res && !res.headersSent) res.json({ status: 'success' });
@@ -183,7 +181,14 @@ async function createSession(phoneNumber, lineId, res = null) {
         });
 
         // Збереження оновлених credentials
-        sock.ev.on('creds.update', saveCreds);
+        sock.ev.on('creds.update', (creds) => {
+            // Якщо з'явився ідентифікатор користувача, позначаємо сесію як авторизовану.
+            if (creds?.me?.id || sock?.user?.id) {
+                setSessionHasUser(phoneNumber, true);
+            }
+
+            saveCreds();
+        });
 
         // Обробка вхідних повідомлень
         sock.ev.on('messages.upsert', async ({ messages }) => {
@@ -577,10 +582,26 @@ async function initRegisteredSessionsWithRetry(
 
 // Оновлення статусу
 function setSessionHealthy(phone, isHealthy) {
+    // Важливо: не скидаємо hasUser в false автоматично, щоб health-check не ламався
+    // під час тимчасових reconnection-подій, коли сокет ще не встиг оновити user.
+    const previous = sessionStatus.get(phone) || {};
+
     sessionStatus.set(phone, {
         healthy: !!isHealthy,
         lastUpdate: Date.now(),
-        hasUser: false
+        hasUser: previous.hasUser === true
+    });
+}
+
+// Централізовано позначаємо, що у сесії є валідний авторизований користувач.
+// Окремий метод спрощує підтримку і запобігає розсинхронізації поля hasUser.
+function setSessionHasUser(phone, hasUser) {
+    const previous = sessionStatus.get(phone) || {};
+
+    sessionStatus.set(phone, {
+        healthy: previous.healthy === true,
+        lastUpdate: Date.now(),
+        hasUser: !!hasUser
     });
 }
 
@@ -595,8 +616,8 @@ app.get('/whatsapp_health', (req, res) => {
             // визначаємо, чи сесія жива
             const healthy =
                 sessionStatus.get(phone)?.healthy === true &&
-                sessionStatus.get(phone)?.hasUser === true &&
-                !!sock?.user;
+                // Дозволяємо healthy, якщо user вже є в sock або зафіксований у статусі.
+                (sessionStatus.get(phone)?.hasUser === true || !!sock?.user);
 
             Logger.log(`${phone} Сесія - ${healthy}`, LogLevels.Info, 'Health');
 
