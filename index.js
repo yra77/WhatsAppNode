@@ -33,6 +33,27 @@ const qrTimers = new Map();
 const initializingPhones = new Map();
 const sessionStatus = new Map();
 
+// Централізована перевірка, чи можна виконувати retry для конкретного номера.
+// Виносимо в окрему функцію, щоб не дублювати однакові умови в різних гілках reconnect.
+function canRetrySession(phoneNumber) {
+    return !!(phoneNumber && phoneNumber !== 'undefined');
+}
+
+// Планувальник повторної ініціалізації сесії.
+// Коментар важливий: retry тепер не блокується відсутнім lineId, бо саме це часто заважає
+// повторно згенерувати QR після connection close (наприклад, код 405).
+function scheduleSessionRetry(phoneNumber, lineId, delayMs, reason) {
+    if (!canRetrySession(phoneNumber)) return;
+
+    Logger.log(
+        `Плануємо повторне створення сесії для ${phoneNumber} через ${delayMs}мс. Причина: ${reason}`,
+        LogLevels.Info,
+        'Reconnect'
+    );
+
+    setTimeout(() => createSession(phoneNumber, lineId), delayMs);
+}
+
 // Функція нормалізації номера телефону для імен файлів
 function normalizePhone(phone) {
     return phone.replace(/[^0-9]/g, '');
@@ -190,16 +211,14 @@ async function createSession(phoneNumber, lineId, res = null) {
                     );
                     await safelyDestroySession(phoneNumber);
 
-                    if (phoneNumber && phoneNumber !== 'undefined' && lineId && lineId !== 'undefined') {
-                        setTimeout(() => createSession(phoneNumber, lineId), 5000);
-                    }
+                    // Retry запускаємо навіть коли lineId тимчасово відсутній:
+                    // для генерації QR критичний саме phoneNumber + чистий auth-state.
+                    scheduleSessionRetry(phoneNumber, lineId, 5000, 'connection close 405');
                     return;
                 }
 
-                if (phoneNumber && phoneNumber !== 'undefined' && lineId && lineId !== 'undefined') {
-                    // Для інших помилок лишаємо звичний backoff перед наступною спробою.
-                    setTimeout(() => createSession(phoneNumber, lineId), 30000);
-                }
+                // Для інших помилок лишаємо звичний backoff перед наступною спробою.
+                scheduleSessionRetry(phoneNumber, lineId, 30000, `connection close ${statusCode || 'unknown'}`);
             }
         });
 
