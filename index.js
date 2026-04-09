@@ -153,29 +153,52 @@ async function createSession(phoneNumber, lineId, res = null) {
 
             if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
-                // Ігноруємо/обробляємо типові тимчасові коди multi-device
-                if ([515, 428].includes(statusCode)) {
+                const disconnectMessage = lastDisconnect?.error?.message || 'no message';
+
+                // зміна статусу сесії
+                setSessionHealthy(phoneNumber, false);
+                Logger.log(
+                    `З'єднання розірвано для ${phoneNumber}. Код: ${statusCode}, причина: ${disconnectMessage}`,
+                    LogLevels.Warning,
+                    'Connection'
+                );
+
+                // Тимчасові коди Baileys: бібліотека зазвичай перепідключиться автоматично.
+                if ([DisconnectReason.restartRequired, DisconnectReason.connectionClosed].includes(statusCode)) {
                     Logger.log(
-                        `Baileys reconnect for ${phoneNumber}, code ${statusCode}`,
+                        `Baileys auto-reconnect для ${phoneNumber}, code ${statusCode}`,
                         LogLevels.Info,
                         'Reconnect'
                     );
                     return;
                 }
 
-                // зміна статусу сесії
-                setSessionHealthy(phoneNumber, false);
-                Logger.log(`З'єднання розірвано для ${phoneNumber}. Код: ${statusCode}`, LogLevels.Warning, 'Connection');
-
                 if (statusCode === DisconnectReason.loggedOut) {
                     Logger.log(`Користувач вийшов з акаунту ${phoneNumber} → видаляємо сесію`, LogLevels.Important, 'Logout');
                     await safelyDestroySession(phoneNumber);
                     await fetch(`${BASE_URL}/whatsapp?handler=AuthError&phone=${encodeURIComponent(phoneNumber)}`).catch(() => { });
+                    return;
                 }
-                else {
-                    if (phoneNumber && phoneNumber != 'undefined'
-                        && lineId && lineId != 'undefined')
-                        setTimeout(() => createSession(phoneNumber, lineId), 30000);
+
+                // Код 405 трапляється при зламаному/несумісному auth-state. Примусово очищаємо сесію
+                // і стартуємо нове QR-з'єднання, інакше сервіс застрягає в нескінченних "close 405".
+                if (statusCode === 405) {
+                    Logger.log(
+                        `Код 405 для ${phoneNumber}: очищаємо auth-state і повторюємо реєстрацію`,
+                        LogLevels.Important,
+                        'Connection'
+                    );
+                    await safelyDestroySession(phoneNumber);
+
+                    if (phoneNumber && phoneNumber !== 'undefined' && lineId && lineId !== 'undefined') {
+                        setTimeout(() => createSession(phoneNumber, lineId), 5000);
+                    }
+                    return;
+                }
+
+                if (phoneNumber && phoneNumber !== 'undefined' && lineId && lineId !== 'undefined') {
+                    // Для інших помилок лишаємо звичний backoff перед наступною спробою.
+                    setTimeout(() => createSession(phoneNumber, lineId), 30000);
                 }
             }
         });
