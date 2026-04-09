@@ -32,6 +32,9 @@ const clients = new Map();
 const qrTimers = new Map();
 const initializingPhones = new Map();
 const sessionStatus = new Map();
+// Зберігаємо "живий" HTTP-відповідь /registerwhatsapp, щоб повернути QR навіть після retry.
+// Це вирішує кейс, коли перша спроба падає (наприклад, connection code 405), а QR з'являється вже на повторі.
+const pendingRegisterResponses = new Map();
 
 // Централізована перевірка, чи можна виконувати retry для конкретного номера.
 // Виносимо в окрему функцію, щоб не дублювати однакові умови в різних гілках reconnect.
@@ -79,6 +82,8 @@ async function safelyDestroySession(phoneNumber) {
     }
 
     clearQrTimer(phoneNumber);
+    // Якщо під час видалення існував pending HTTP-виклик реєстрації — прибираємо його.
+    pendingRegisterResponses.delete(phoneNumber);
     initializingPhones.delete(phoneNumber);
 }
 
@@ -88,6 +93,21 @@ function clearQrTimer(phoneNumber) {
         clearTimeout(qrTimers.get(phoneNumber));
         qrTimers.delete(phoneNumber);
     }
+}
+
+// Централізовано повертаємо відповідь клієнту реєстрації, якщо вона ще відкрита.
+// Додатково чистимо pending-map, щоб не тримати "висячі" response-об'єкти.
+function respondToPendingRegister(phoneNumber, payload, statusCode = 200) {
+    const pendingRes = pendingRegisterResponses.get(phoneNumber);
+    if (!pendingRes) return false;
+    if (pendingRes.headersSent) {
+        pendingRegisterResponses.delete(phoneNumber);
+        return false;
+    }
+
+    pendingRes.status(statusCode).json(payload);
+    pendingRegisterResponses.delete(phoneNumber);
+    return true;
 }
 
 // Допоміжний метод: будуємо коректний JID для відправки у WhatsApp.
@@ -140,7 +160,12 @@ async function createSession(phoneNumber, lineId, res = null) {
 
             if (qr) {
                 // додамо ліміт на кількість QR
-                if (res && !res.headersSent) res.json({ status: 'qr', qr: await qrcode.toDataURL(qr) });
+                const qrPayload = { status: 'qr', qr: await qrcode.toDataURL(qr) };
+                if (res && !res.headersSent) {
+                    res.json(qrPayload);
+                } else {
+                    respondToPendingRegister(phoneNumber, qrPayload);
+                }
                 Logger.log(`Згенеровано QR-код для ${phoneNumber}`, LogLevels.Info, 'QR');
                 // зміна статусу сесії
                 setSessionHealthy(phoneNumber, false);
@@ -166,7 +191,11 @@ async function createSession(phoneNumber, lineId, res = null) {
                 setSessionHasUser(phoneNumber, !!sock.user);
 
                 Logger.log(`Сесія успішно підключена: ${phoneNumber}`, LogLevels.Success, 'Connection');
-                if (res && !res.headersSent) res.json({ status: 'success' });
+                if (res && !res.headersSent) {
+                    res.json({ status: 'success' });
+                } else {
+                    respondToPendingRegister(phoneNumber, { status: 'success' });
+                }
 
                 // Сповіщення ASP.NET
                 await fetch(`${BASE_URL}/whatsapp?handler=NotifyAuthSuccess&phone=${encodeURIComponent(phoneNumber)}&lineId=${encodeURIComponent(lineId)}`).catch(() => { });
@@ -243,6 +272,8 @@ async function createSession(phoneNumber, lineId, res = null) {
         Logger.log(`Критична помилка при створенні сесії ${phoneNumber}: ${err.message}`, LogLevels.Error, 'CreateSession');
         if (res && !res.headersSent) {
             res.status(500).json({ status: 'error', message: err.message });
+        } else {
+            respondToPendingRegister(phoneNumber, { status: 'error', message: err.message }, 500);
         }
     }
 }
@@ -468,6 +499,8 @@ app.post('/registerwhatsapp', async (req, res) => {
             return res.status(400).json({ status: 'error', message: 'Необхідні phone та lineId' });
         }
 
+        // Тримаємо останню активну відповідь для номера, щоб retry міг повернути QR у той самий HTTP-виклик.
+        pendingRegisterResponses.set(phone, res);
         await createSession(phone, lineId, res);
     } catch (err) {
         Logger.log(`Помилка в /registerwhatsapp: ${err.message}`, LogLevels.Error, 'API');
