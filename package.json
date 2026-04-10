@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "prepare:pkg": "node scripts/prepare-pkg.js",
+    "build:exe": "npm run prepare:pkg && pkg . --output whatsappserver3.exe",
+    "build:exe:debug": "npm run prepare:pkg && pkg . --debug --output whatsappserver3.exe"
   },
   "keywords": [],
   "author": "",
