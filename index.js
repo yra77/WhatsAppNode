@@ -35,6 +35,10 @@ const qrTimers = new Map();
 // Стан сесій для health-check та синхронізації з CRM/сервером.
 const sessionStatus = new Map();
 
+// Ліміти повторних спроб видалення директорій сесії (актуально для Windows EBUSY/EPERM).
+const SESSION_REMOVE_RETRIES = 8;
+const SESSION_REMOVE_RETRY_DELAY_MS = 500;
+
 // Функція для очищення таймерів
 function clearQrTimer(phoneNumber) {
     if (qrTimers.has(phoneNumber)) {
@@ -156,6 +160,11 @@ function getCachePath(phoneNumber) {
 
 // Функція для затримки
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Перевірка, що об'єкт схожий на Express response і безпечно підтримує JSON-відповідь.
+function canReplyJson(res) {
+    return !!res && res.headersSent !== true && typeof res.json === 'function';
+}
 
 // Функція для отримання списку зареєстрованих номерів із ASP.NET
 async function fetchRegisteredPhones(maxRetries = 5, retryDelay = 30000) {
@@ -302,14 +311,21 @@ function handleQrEvent(client, phoneNumber, res) {
             setSessionHealth(phoneNumber, { healthy: false, hasUser: false, state: 'qr' });
             await pushSessionHealthToServer('qr');
             const qrImage = await qrcode.toDataURL(qr);
-            res.json({ status: 'qr', qr: qrImage, phone: phoneNumber });
-            qrTimers.set(phoneNumber, setTimeout(() => {
+            // Відповідаємо тільки якщо це реальний HTTP response (а не технічний заглушковий об'єкт).
+            if (canReplyJson(res)) {
+                res.json({ status: 'qr', qr: qrImage, phone: phoneNumber });
+            }
+
+            // Таймер для незасканованого QR: коректно закриваємо клієнт і гарантовано чистимо директорії.
+            qrTimers.set(phoneNumber, setTimeout(async () => {
                 if (!client.authInfo) {
-                    client.destroy();
+                    await client.destroy().catch((err) => {
+                        logger.log(`Помилка закриття клієнта по таймауту QR для ${phoneNumber}: ${err.message}`, LogLevels.Warning, 'handleQrEvent');
+                    });
                     clients.delete(phoneNumber);
                     clearQrTimer(phoneNumber);
 
-                    removeSessionData(phoneNumber);
+                    await removeSessionData(phoneNumber);
 
                     logger.log(`Час на сканування QR-коду для ${phoneNumber} минув`, LogLevels.Warning, 'handleQrEvent');
                     setTimeout(() => createSession(phoneNumber, null, { headersSent: true }), 30000);
@@ -341,7 +357,7 @@ function handleReadyEvent(phoneNumber, lineId, res = { headersSent: false }) {
             }
 
             // Перевіряємо, чи res має метод json (тобто це Express-відповідь)
-            if (!res.headersSent && typeof res.json === 'function') {
+            if (canReplyJson(res)) {
                 res.json({ status: 'success', message: 'Автентифікація успішна', phone: phoneNumber, lineId });
             }
             clearQrTimer(phoneNumber);
@@ -367,11 +383,12 @@ function handleAuthFailureEvent(phoneNumber, res = { headersSent: false }) {
         logger.log(`Помилка авторизації: ${phoneNumber} - ${msg}`, LogLevels.Error, 'handleAuthFailureEvent');
         setSessionHealth(phoneNumber, { healthy: false, hasUser: false, state: 'auth_failure' });
         await pushSessionHealthToServer('auth_failure');
-        if (!res.headersSent) {
+        if (canReplyJson(res)) {
             res.status(401).json({ status: 'error', message: 'Помилка авторизації' });
         }
         clients.delete(phoneNumber);
         clearQrTimer(phoneNumber);
+        await removeSessionData(phoneNumber);
         setTimeout(() => createSession(phoneNumber, null, { headersSent: true }), 30000); // Повторна спроба
     };
 }
@@ -673,27 +690,44 @@ function createSession(phoneNumber, lineId, res) {
 
 
 // Функція для видалення теки сесії
-function removeSessionData(phoneNumber) {
+async function removeSessionData(phoneNumber) {
     const sessionPath = getSessionPath(phoneNumber);
     const cachePath = getCachePath(phoneNumber);
 
-    if (fs.existsSync(sessionPath)) {
-        try {
-            fs.removeSync(sessionPath);
-            logger.log(`Каталог сесії видалено: ${sessionPath}`, LogLevels.Info, 'session');
-        } catch (err) {
-            logger.log(`Помилка видалення каталогу сесії ${sessionPath}: ${err.message}`, LogLevels.Error, 'session');
+    // Внутрішній helper: retry-видалення для директорій, які можуть бути тимчасово заблоковані Chromium.
+    async function removeDirectoryWithRetry(targetPath, label) {
+        for (let attempt = 1; attempt <= SESSION_REMOVE_RETRIES; attempt++) {
+            if (!fs.existsSync(targetPath)) {
+                return true;
+            }
+
+            try {
+                await fs.remove(targetPath);
+                logger.log(`Каталог ${label} видалено: ${targetPath}`, LogLevels.Info, 'session');
+                return true;
+            } catch (err) {
+                const canRetry = ['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(err.code);
+                const isLastAttempt = attempt === SESSION_REMOVE_RETRIES;
+
+                if (!canRetry || isLastAttempt) {
+                    logger.log(`Помилка видалення каталогу ${label} ${targetPath}: ${err.message}`, LogLevels.Error, 'session');
+                    return false;
+                }
+
+                logger.log(
+                    `Спроба ${attempt}/${SESSION_REMOVE_RETRIES}: каталог ${label} ще зайнятий (${err.code}). Повтор через ${SESSION_REMOVE_RETRY_DELAY_MS}мс.`,
+                    LogLevels.Warning,
+                    'session'
+                );
+                await delay(SESSION_REMOVE_RETRY_DELAY_MS);
+            }
         }
+
+        return false;
     }
 
-    if (fs.existsSync(cachePath)) {
-        try {
-            fs.removeSync(cachePath);
-            logger.log(`Каталог кешу видалено: ${cachePath}`, LogLevels.Info, 'session');
-        } catch (err) {
-            logger.log(`Помилка видалення каталогу кешу ${cachePath}: ${err.message}`, LogLevels.Error, 'session');
-        }
-    }
+    await removeDirectoryWithRetry(sessionPath, 'сесії');
+    await removeDirectoryWithRetry(cachePath, 'кешу');
 }
 
 // Отримання даних від ASP.NET для старту реєстрації
@@ -707,9 +741,24 @@ app.post('/registerwhatsapp', async (req, res) => {
 
         const normalizedPhone = normalizePhone(phone);
         const sessionPath = getSessionPath(normalizedPhone);
-        if (clients.has(normalizedPhone) || fs.existsSync(sessionPath)) {
+        if (clients.has(normalizedPhone)) {
             logger.log(`Сесія вже існує або активна для ${normalizedPhone}`, LogLevels.Info, 'register');
             return res.status(200).json({ status: 'connected', message: 'Сесія вже існує або активна', phone: normalizedPhone, lineId });
+        }
+
+        // Якщо лишилася "осиротіла" директорія без активного клієнта — очищаємо її і дозволяємо реєстрацію.
+        if (fs.existsSync(sessionPath)) {
+            logger.log(`Знайдено осиротілу сесію для ${normalizedPhone}. Спроба автоматичного очищення перед реєстрацією.`, LogLevels.Warning, 'register');
+            await removeSessionData(normalizedPhone);
+
+            if (fs.existsSync(sessionPath)) {
+                logger.log(`Не вдалося очистити каталог сесії для ${normalizedPhone}`, LogLevels.Error, 'register');
+                return res.status(423).json({
+                    status: 'error',
+                    message: 'Каталог сесії зайнятий. Спробуйте повторити запит через декілька секунд.',
+                    phone: normalizedPhone
+                });
+            }
         }
 
         createSession(normalizedPhone, lineId, res);
@@ -803,7 +852,7 @@ app.delete('/sessiondelete/:phone', async (req, res) => {
             logger.log(`Сесія видалена: ${phone}`, LogLevels.Info, 'session');
         }
 
-        removeSessionData(phone);
+        await removeSessionData(phone);
 
         res.json({ status: 'deleted', phone, message: 'Сесія успішно видалена' });
     } catch (err) {
