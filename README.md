@@ -9,14 +9,13 @@ Node.js сервіс інтеграції WhatsApp Web (`whatsapp-web.js`) з CR
 - Пакування: `pkg@5.8.1`
 - Ціль пакування в проєкті: `node18-win-x64` (це нормально для `pkg@5.8.1`)
 
-### Що оновлено в цьому коміті
-1. Додано скрипт підготовки до `pkg`: `scripts/prepare-pkg.js`.
-   - Скрипт прибирає `node_modules/puppeteer/.local-chromium`, щоб не отримувати дубльовані warning-и `Cannot include directory ... .local-chromium`.
-2. Додано npm-скрипти для збирання `.exe`:
-   - `npm run prepare:pkg`
-   - `npm run build:exe`
-   - `npm run build:exe:debug`
-3. README приведено до актуального стану: старі/неактуальні пункти прибрано, додано практичні кроки для збірки.
+### Що оновлено в останніх змінах
+1. У `index.js` додано облік актуального стану сесій (`sessionStatus`) та оновлення стану на подіях `qr`, `authenticated`, `ready`, `auth_failure`, `disconnected`, `sessiondelete`.
+2. Додано endpoint `GET /whatsapp_health` (сумісний формат із `index_old.js`): масив `[{ phone, status }]`, де `status: 1` — сесія жива, `status: 0` — неактивна.
+3. Додано опціональну синхронізацію стану сесій на зовнішній сервер:
+   - через змінну `.env`: `SESSION_HEALTH_PUSH_URL`
+   - push виконується при змінах стану сесії та періодично (раз на 60 секунд).
+4. README оновлено: прибрано неактуальні пункти, додано інструкції по health-моніторингу.
 
 ---
 
@@ -60,6 +59,8 @@ Node.js сервіс інтеграції WhatsApp Web (`whatsapp-web.js`) з CR
 PORT=3000
 BASE_URL=http://localhost:5000
 LOG_DIR=Logs
+# Опційно: URL для отримання актуального стану всіх сесій (POST JSON).
+SESSION_HEALTH_PUSH_URL=
 ```
 
 ---
@@ -93,6 +94,15 @@ npm run build:exe:debug
 ### `GET /status/:phone`
 Повертає стан сесії для номера (`connected` / `disconnected`).
 
+### `GET /whatsapp_health`
+Повертає стан усіх активних сесій у форматі:
+```json
+[
+  { "phone": "+380...", "status": 1 },
+  { "phone": "+380...", "status": 0 }
+]
+```
+
 ### `DELETE /sessiondelete/:phone`
 Видаляє активну сесію та локальні дані авторизації/кешу.
 
@@ -100,13 +110,11 @@ npm run build:exe:debug
 
 ## Що ще треба зробити в проєкті (next steps)
 1. Додати валідацію payload (`zod` або `joi`) для `/registerwhatsapp` і `/sendmsg`.
-2. Додати endpoint `GET /whatsapp_health` з форматом для CRM-моніторингу.
-3. Додати автотести:
-   - юніт-тести для `normalizePhone`, `getSessionPath`, `getCachePath`;
-   - інтеграційні тести endpoint-ів (`supertest`).
-4. Додати захист API:
+2. Додати захист API:
    - `rate limit`;
    - секрет/токен між CRM і Node-сервісом.
-5. Додати structured logging + `requestId` для кореляції логів CRM/Node.
-6. Описати production runbook (`pm2/systemd`, автостарт, ротація логів, backup сесій).
-7. Додати метрики (`/metrics`, Prometheus): reconnect, auth failure, send failures, uptime.
+3. Додати structured logging + `requestId` для кореляції логів CRM/Node.
+4. Описати production runbook (`pm2/systemd`, автостарт, ротація логів, backup сесій).
+5. Додати метрики (`/metrics`, Prometheus): reconnect, auth failure, send failures, uptime.
+
+> Важливо: тести **не потрібно** створювати у репозиторії. За потреби дозволено запускати локальні перевірки лише під час розробки без додавання тестових файлів у git.

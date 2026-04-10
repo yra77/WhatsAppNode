@@ -32,6 +32,8 @@ fs.ensureDirSync(CACHE_DIR);
 // Всі активні клієнти та таймери
 const clients = new Map();
 const qrTimers = new Map();
+// Стан сесій для health-check та синхронізації з CRM/сервером.
+const sessionStatus = new Map();
 
 // Функція для очищення таймерів
 function clearQrTimer(phoneNumber) {
@@ -44,6 +46,78 @@ function clearQrTimer(phoneNumber) {
 // Функція для нормалізації телефонного номера (ключ для Map/роутів).
 function normalizePhone(phoneNumber) {
     return String(phoneNumber || '').trim();
+}
+
+// Оновлення health-стану для конкретної сесії.
+function setSessionHealth(phoneNumber, updates = {}) {
+    const current = sessionStatus.get(phoneNumber) || {
+        healthy: false,
+        hasUser: false,
+        state: 'disconnected',
+        lastUpdate: Date.now()
+    };
+
+    const next = {
+        ...current,
+        ...updates,
+        lastUpdate: Date.now()
+    };
+
+    sessionStatus.set(phoneNumber, next);
+    return next;
+}
+
+// Формування поточного snapshot усіх сесій для віддачі в endpoint і синхронізації на сервер.
+function buildSessionHealthSnapshot() {
+    const result = [];
+
+    for (const [phone, client] of clients.entries()) {
+        const state = sessionStatus.get(phone) || {};
+        const healthy = state.healthy === true && state.hasUser === true && !!client?.info?.wid?.user;
+
+        result.push({
+            phone,
+            status: healthy ? 1 : 0,
+            healthy,
+            hasUser: state.hasUser === true,
+            state: state.state || 'unknown',
+            lastUpdate: state.lastUpdate || Date.now()
+        });
+    }
+
+    return result;
+}
+
+// Передаємо актуальний стан сесій на зовнішній сервер (якщо налаштовано SESSION_HEALTH_PUSH_URL).
+async function pushSessionHealthToServer(reason = 'periodic') {
+    const targetUrl = process.env.SESSION_HEALTH_PUSH_URL;
+    if (!targetUrl) {
+        return;
+    }
+
+    const payload = {
+        source: 'whatsapp-node',
+        reason,
+        timestamp: new Date().toISOString(),
+        sessions: buildSessionHealthSnapshot()
+    };
+
+    try {
+        const response = await fetch(targetUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            logger.log(`Не вдалося передати стан сесій. HTTP ${response.status}`, LogLevels.Warning, 'healthPush');
+            return;
+        }
+
+        logger.log(`Стан сесій успішно передано (${payload.sessions.length} сесій)`, LogLevels.Info, 'healthPush');
+    } catch (err) {
+        logger.log(`Помилка передачі стану сесій: ${err.message}`, LogLevels.Warning, 'healthPush');
+    }
 }
 
 // Функція для отримання шляху до сесії
@@ -127,6 +201,8 @@ async function initializeRegisteredSessions() {
                 });
 
                 clients.set(normalizedPhone, client);
+                // Сесія відновлюється із збережених даних, очікуємо подію ready/authenticated.
+                setSessionHealth(normalizedPhone, { healthy: false, hasUser: false, state: 'restoring' });
 
                 // Важливо: у callback передаємо реальний номер, а не cleanedClientId,
                 // щоб коректно працювали notify URL, пошук клієнта та cleanup.
@@ -176,6 +252,8 @@ function initializeClient(phoneNumber, lineId) {
         });
 
         clients.set(normalizedPhone, client);
+        // Повторна ініціалізація: фіксуємо проміжний стан до ready.
+        setSessionHealth(normalizedPhone, { healthy: false, hasUser: false, state: 'reinitializing' });
 
         client.on('ready', handleReadyEvent(normalizedPhone, lineId));
         client.on('authenticated', handleAuthenticatedEvent(normalizedPhone));
@@ -198,6 +276,9 @@ function handleQrEvent(client, phoneNumber, res) {
 
     return async (qr) => {
         try {
+            // Поки активний QR, сесія ще не вважається healthy.
+            setSessionHealth(phoneNumber, { healthy: false, hasUser: false, state: 'qr' });
+            await pushSessionHealthToServer('qr');
             const qrImage = await qrcode.toDataURL(qr);
             res.json({ status: 'qr', qr: qrImage, phone: phoneNumber });
             qrTimers.set(phoneNumber, setTimeout(() => {
@@ -223,6 +304,9 @@ function handleReadyEvent(phoneNumber, lineId, res = { headersSent: false }) {
     return async () => {
         try {
             logger.log(`WhatsApp підключено: ${phoneNumber}`, LogLevels.Info, 'handleReadyEvent');
+            // Сесія готова до роботи та має підключеного користувача.
+            setSessionHealth(phoneNumber, { healthy: true, hasUser: true, state: 'ready' });
+            await pushSessionHealthToServer('ready');
             clearQrTimer(phoneNumber);
 
             const notifyUrl = `${process.env.BASE_URL}/whatsapp?handler=NotifyAuthSuccess&phone=${encodeURIComponent(phoneNumber)}&lineId=${encodeURIComponent(lineId || '')}`;
@@ -249,14 +333,18 @@ function handleReadyEvent(phoneNumber, lineId, res = { headersSent: false }) {
 function handleAuthenticatedEvent(phoneNumber) {
     return () => {
         logger.log(`Аутентифікація успішна: ${phoneNumber}`, LogLevels.Success, 'handleAuthenticatedEvent');
+        // Авторизація пройдена, але повна готовність фіксується в ready.
+        setSessionHealth(phoneNumber, { healthy: true, state: 'authenticated' });
         clearQrTimer(phoneNumber);
     };
 }
 
 // Обробка помилки автентифікації
 function handleAuthFailureEvent(phoneNumber, res = { headersSent: false }) {
-    return (msg) => {
+    return async (msg) => {
         logger.log(`Помилка авторизації: ${phoneNumber} - ${msg}`, LogLevels.Error, 'handleAuthFailureEvent');
+        setSessionHealth(phoneNumber, { healthy: false, hasUser: false, state: 'auth_failure' });
+        await pushSessionHealthToServer('auth_failure');
         if (!res.headersSent) {
             res.status(401).json({ status: 'error', message: 'Помилка авторизації' });
         }
@@ -268,8 +356,10 @@ function handleAuthFailureEvent(phoneNumber, res = { headersSent: false }) {
 
 // Обробка відключення
 function handleDisconnectedEvent(phoneNumber) {
-    return (reason) => {
+    return async (reason) => {
         logger.log(`Відключено: ${phoneNumber} - ${reason}`, LogLevels.Warning, 'handleDisconnectedEvent');
+        setSessionHealth(phoneNumber, { healthy: false, hasUser: false, state: 'disconnected' });
+        await pushSessionHealthToServer('disconnected');
         clients.delete(phoneNumber);
         clearQrTimer(phoneNumber);
         setTimeout(() => initializeClient(phoneNumber, null), 30000); // Повторна ініціалізація
@@ -522,6 +612,8 @@ function createSession(phoneNumber, lineId, res) {
             }
         });
         clients.set(normalizedPhone, client);
+        // Після створення клієнта відмічаємо сесію як стартовану, але ще не готову.
+        setSessionHealth(normalizedPhone, { healthy: false, hasUser: false, state: 'initializing' });
 
         if (!client) {
             throw new Error("Client instance is null after creation");
@@ -673,6 +765,8 @@ app.delete('/sessiondelete/:phone', async (req, res) => {
             await client.destroy().catch(err => logger.log(`Помилка при закритті сесії ${phone}: ${err.message}`, LogLevels.Error, 'sessiondelete'));
             clients.delete(phone);
             clearQrTimer(phone);
+            setSessionHealth(phone, { healthy: false, hasUser: false, state: 'deleted' });
+            await pushSessionHealthToServer('deleted');
             logger.log(`Сесія видалена: ${phone}`, LogLevels.Info, 'session');
         }
 
@@ -685,10 +779,31 @@ app.delete('/sessiondelete/:phone', async (req, res) => {
     }
 });
 
+// Endpoint для перевірки стану сесій (сумісно з index_old.js: [{ phone, status }]).
+app.get('/whatsapp_health', (req, res) => {
+    try {
+        const result = buildSessionHealthSnapshot().map(({ phone, status }) => ({ phone, status }));
+        logger.log(`Запит /whatsapp_health, кількість сесій: ${result.length}`, LogLevels.Info, 'health');
+        res.json(result);
+    } catch (err) {
+        logger.log(`Помилка whatsapp_health: ${err.message}`, LogLevels.Error, 'health');
+        res.status(500).json({
+            status: 'error',
+            message: 'Health-check failed'
+        });
+    }
+});
+
 // Запуск сервера
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
     logger.log(`WhatsApp Multi Session Server запущено на порті ${PORT}`, LogLevels.Info, 'server');
+    // Періодична синхронізація стану сесій на зовнішній сервер (раз на 60 секунд).
+    setInterval(() => {
+        pushSessionHealthToServer('periodic').catch((err) => {
+            logger.log(`Помилка periodic health push: ${err.message}`, LogLevels.Warning, 'healthPush');
+        });
+    }, 60000);
     await initializeRegisteredSessions().catch(err => {
         logger.log(`Помилка в initializeRegisteredSessions: ${err.message}. Продовжую роботу сервера.`, LogLevels.Error, 'server');
     });
