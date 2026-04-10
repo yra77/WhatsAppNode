@@ -8,8 +8,10 @@ const fetch = require('node-fetch');
 const { Logger: logger, LogLevels } = require('./logger');
 const app = express();
 
-// Шлях до Chrome (вийнятий з Puppeteer або окремо встановлений)
-const chromePath = path.join(process.cwd(), 'chromium', 'chrome.exe');
+// Шлях до локального Chromium у корені проєкту (Windows-бінарник).
+// Якщо файла немає — використовуємо Chromium/Puppeteer за замовчуванням бібліотеки.
+const localChromePath = path.join(process.cwd(), 'chromium', 'chrome.exe');
+const chromePath = fs.existsSync(localChromePath) ? localChromePath : undefined;
 
 app.use(express.json());
 
@@ -37,6 +39,11 @@ function clearQrTimer(phoneNumber) {
         clearTimeout(qrTimers.get(phoneNumber));
         qrTimers.delete(phoneNumber);
     }
+}
+
+// Функція для нормалізації телефонного номера (ключ для Map/роутів).
+function normalizePhone(phoneNumber) {
+    return String(phoneNumber || '').trim();
 }
 
 // Функція для отримання шляху до сесії
@@ -95,11 +102,12 @@ async function initializeRegisteredSessions() {
         }
 
         for (const { phoneNumber, lineId } of registeredPhones) {
-            const cleanedClientId = phoneNumber.replace(/[^a-zA-Z0-9_-]/g, '');
-            const sessionPath = getSessionPath(cleanedClientId);
+            const normalizedPhone = normalizePhone(phoneNumber);
+            const cleanedClientId = normalizedPhone.replace(/[^a-zA-Z0-9_-]/g, '');
+            const sessionPath = getSessionPath(normalizedPhone);
 
             if (fs.existsSync(sessionPath)) {
-                logger.log(`Знайдено збережену сесію для ${phoneNumber}, ініціалізація...`, LogLevels.Info, 'initializeRegisteredSessions');
+                logger.log(`Знайдено збережену сесію для ${normalizedPhone}, ініціалізація...`, LogLevels.Info, 'initializeRegisteredSessions');
 
                 const client = new Client({
                     authStrategy: new LocalAuth({ clientId: cleanedClientId, dataPath: AUTH_DIR }),
@@ -118,23 +126,25 @@ async function initializeRegisteredSessions() {
                     }
                 });
 
-                clients.set(phoneNumber, client);
+                clients.set(normalizedPhone, client);
 
-                client.on('ready', handleReadyEvent(cleanedClientId, lineId));
-                client.on('authenticated', handleAuthenticatedEvent(phoneNumber));
-                client.on('auth_failure', handleAuthFailureEvent(phoneNumber));
-                client.on('disconnected', handleDisconnectedEvent(phoneNumber));
-                client.on('message', (message) => handleMessageEvent(message, phoneNumber));
+                // Важливо: у callback передаємо реальний номер, а не cleanedClientId,
+                // щоб коректно працювали notify URL, пошук клієнта та cleanup.
+                client.on('ready', handleReadyEvent(normalizedPhone, lineId));
+                client.on('authenticated', handleAuthenticatedEvent(normalizedPhone));
+                client.on('auth_failure', handleAuthFailureEvent(normalizedPhone));
+                client.on('disconnected', handleDisconnectedEvent(normalizedPhone));
+                client.on('message', (message) => handleMessageEvent(message, normalizedPhone));
 
                 try {
                     await client.initialize();
                 } catch (err) {
-                    logger.log(`Помилка ініціалізації клієнта WhatsApp для ${phoneNumber}: ${err.message}. Спроба переініціалізації через 30 секунд.`, LogLevels.Error, 'initializeRegisteredSessions');
-                    clients.delete(phoneNumber);
-                    setTimeout(() => initializeClient(phoneNumber, lineId), 30000); // Перезапуск через 30 секунд
+                    logger.log(`Помилка ініціалізації клієнта WhatsApp для ${normalizedPhone}: ${err.message}. Спроба переініціалізації через 30 секунд.`, LogLevels.Error, 'initializeRegisteredSessions');
+                    clients.delete(normalizedPhone);
+                    setTimeout(() => initializeClient(normalizedPhone, lineId), 30000); // Перезапуск через 30 секунд
                 }
             } else {
-                logger.log(`Немає збереженої сесії для ${phoneNumber}, пропускаємо ініціалізацію`, LogLevels.Warning, 'initializeRegisteredSessions');
+                logger.log(`Немає збереженої сесії для ${normalizedPhone}, пропускаємо ініціалізацію`, LogLevels.Warning, 'initializeRegisteredSessions');
             }
         }
     } catch (err) {
@@ -144,8 +154,9 @@ async function initializeRegisteredSessions() {
 
 // Функція для повторної ініціалізації клієнта
 function initializeClient(phoneNumber, lineId) {
-    const cleanedClientId = phoneNumber.replace(/[^a-zA-Z0-9_-]/g, '');
-    const sessionPath = getSessionPath(cleanedClientId);
+    const normalizedPhone = normalizePhone(phoneNumber);
+    const cleanedClientId = normalizedPhone.replace(/[^a-zA-Z0-9_-]/g, '');
+    const sessionPath = getSessionPath(normalizedPhone);
     if (fs.existsSync(sessionPath)) {
         const client = new Client({
             authStrategy: new LocalAuth({ clientId: cleanedClientId, dataPath: AUTH_DIR }),
@@ -164,18 +175,18 @@ function initializeClient(phoneNumber, lineId) {
             }
         });
 
-        clients.set(phoneNumber, client);
+        clients.set(normalizedPhone, client);
 
-        client.on('ready', handleReadyEvent(cleanedClientId, lineId));
-        client.on('authenticated', handleAuthenticatedEvent(phoneNumber));
-        client.on('auth_failure', handleAuthFailureEvent(phoneNumber));
-        client.on('disconnected', handleDisconnectedEvent(phoneNumber));
-        client.on('message', (message) => handleMessageEvent(message, phoneNumber));
+        client.on('ready', handleReadyEvent(normalizedPhone, lineId));
+        client.on('authenticated', handleAuthenticatedEvent(normalizedPhone));
+        client.on('auth_failure', handleAuthFailureEvent(normalizedPhone));
+        client.on('disconnected', handleDisconnectedEvent(normalizedPhone));
+        client.on('message', (message) => handleMessageEvent(message, normalizedPhone));
 
         client.initialize().catch((err) => {
-            logger.log(`Помилка повторної ініціалізації для ${phoneNumber}: ${err.message}. Спроба через 30 секунд.`, LogLevels.Error, 'initializeClient');
-            clients.delete(phoneNumber);
-            setTimeout(() => initializeClient(phoneNumber, lineId), 30000);
+            logger.log(`Помилка повторної ініціалізації для ${normalizedPhone}: ${err.message}. Спроба через 30 секунд.`, LogLevels.Error, 'initializeClient');
+            clients.delete(normalizedPhone);
+            setTimeout(() => initializeClient(normalizedPhone, lineId), 30000);
         });
     }
 }
@@ -491,8 +502,9 @@ async function handleMessageEvent(message, phoneNumber) {
 // Ініціалізація сесії
 function createSession(phoneNumber, lineId, res) {
     try {
-        const cleanedClientId = phoneNumber.replace(/[^a-zA-Z0-9_-]/g, '');
-        const sessionPath = getSessionPath(phoneNumber);
+        const normalizedPhone = normalizePhone(phoneNumber);
+        const cleanedClientId = normalizedPhone.replace(/[^a-zA-Z0-9_-]/g, '');
+        const sessionPath = getSessionPath(normalizedPhone);
         const client = new Client({
             authStrategy: new LocalAuth({ clientId: cleanedClientId, dataPath: AUTH_DIR }),
             puppeteer: {
@@ -509,25 +521,25 @@ function createSession(phoneNumber, lineId, res) {
                     '--disable-background-timer-throttling']
             }
         });
-        clients.set(phoneNumber, client);
+        clients.set(normalizedPhone, client);
 
         if (!client) {
             throw new Error("Client instance is null after creation");
         }
 
-        client.on('qr', handleQrEvent(client, phoneNumber, res));
-        client.on('ready', handleReadyEvent(cleanedClientId, lineId, res));
-        client.on('authenticated', handleAuthenticatedEvent(phoneNumber));
-        client.on('auth_failure', handleAuthFailureEvent(phoneNumber, res));
-        client.on('disconnected', handleDisconnectedEvent(phoneNumber));
-        client.on('message', (message) => handleMessageEvent(message, phoneNumber));
+        client.on('qr', handleQrEvent(client, normalizedPhone, res));
+        client.on('ready', handleReadyEvent(normalizedPhone, lineId, res));
+        client.on('authenticated', handleAuthenticatedEvent(normalizedPhone));
+        client.on('auth_failure', handleAuthFailureEvent(normalizedPhone, res));
+        client.on('disconnected', handleDisconnectedEvent(normalizedPhone));
+        client.on('message', (message) => handleMessageEvent(message, normalizedPhone));
 
         client.initialize().then(() => {
-            logger.log(`Initialize success for ${phoneNumber}`, LogLevels.Success, 'init');
+            logger.log(`Initialize success for ${normalizedPhone}`, LogLevels.Success, 'init');
         }).catch((err) => {
-            logger.log(`Помилка ініціалізації клієнта WhatsApp для ${phoneNumber}: ${err.message}. Спроба переініціалізації через 30 секунд.`, LogLevels.Error, 'createSession');
-            clients.delete(phoneNumber);
-            setTimeout(() => createSession(phoneNumber, lineId, { headersSent: true }), 30000);
+            logger.log(`Помилка ініціалізації клієнта WhatsApp для ${normalizedPhone}: ${err.message}. Спроба переініціалізації через 30 секунд.`, LogLevels.Error, 'createSession');
+            clients.delete(normalizedPhone);
+            setTimeout(() => createSession(normalizedPhone, lineId, { headersSent: true }), 30000);
         });
     } catch (err) {
         logger.log(`Нештатна ситуація в createSession для ${phoneNumber}: ${err.message}. Продовжую роботу сервера.`, LogLevels.Error, 'createSession');
@@ -568,13 +580,14 @@ app.post('/registerwhatsapp', async (req, res) => {
             return res.status(400).json({ status: 'error', message: 'Phone number is required' });
         }
 
-        const sessionPath = getSessionPath(phone);
-        if (clients.has(phone) || fs.existsSync(sessionPath)) {
-            logger.log(`Сесія вже існує або активна для ${phone}`, LogLevels.Info, 'register');
-            return res.status(200).json({ status: 'connected', message: 'Сесія вже існує або активна', phone, lineId });
+        const normalizedPhone = normalizePhone(phone);
+        const sessionPath = getSessionPath(normalizedPhone);
+        if (clients.has(normalizedPhone) || fs.existsSync(sessionPath)) {
+            logger.log(`Сесія вже існує або активна для ${normalizedPhone}`, LogLevels.Info, 'register');
+            return res.status(200).json({ status: 'connected', message: 'Сесія вже існує або активна', phone: normalizedPhone, lineId });
         }
 
-        createSession(phone, lineId, res);
+        createSession(normalizedPhone, lineId, res);
     } catch (err) {
         logger.log(`Помилка в /registerwhatsapp для ${req.body.phone}: ${err.message}. Продовжую роботу сервера.`, LogLevels.Error, 'register');
         res.status(500).json({ status: 'error', message: 'Внутрішня помилка сервера' });
@@ -591,10 +604,11 @@ app.post('/sendmsg', async (req, res) => {
             return res.status(400).json({ status: 'error', message: 'Необхідні параметри: from, to, message' });
         }
 
-        const client = clients.get(from);
+        const normalizedFrom = normalizePhone(from);
+        const client = clients.get(normalizedFrom);
         if (!client) {
-            logger.log(`Клієнт не підключений для ${from}. Спроба переініціалізації через 30 секунд.`, LogLevels.Warning, 'send');
-            setTimeout(() => createSession(from, null, { headersSent: true }), 30000); // Повторна спроба
+            logger.log(`Клієнт не підключений для ${normalizedFrom}. Спроба переініціалізації через 30 секунд.`, LogLevels.Warning, 'send');
+            setTimeout(() => createSession(normalizedFrom, null, { headersSent: true }), 30000); // Повторна спроба
             return res.status(404).json({ status: 'error', message: 'Клієнт не підключений' });
         }
 
@@ -617,7 +631,7 @@ app.post('/sendmsg', async (req, res) => {
         }
 
         const messageId = sentMessage?.id?.id || require('crypto').randomBytes(8).toString('hex');
-        logger.log(`Повідомлення відправлено від ${from} до ${to}, messageId: ${messageId}, contentType: ${contentType}`, LogLevels.Success, 'send');
+        logger.log(`Повідомлення відправлено від ${normalizedFrom} до ${to}, messageId: ${messageId}, contentType: ${contentType}`, LogLevels.Success, 'send');
 
         res.json({
             status: 'sent',
@@ -633,7 +647,8 @@ app.post('/sendmsg', async (req, res) => {
 // Отримання статусу сесії
 app.get('/status/:phone', (req, res) => {
     try {
-        const phone = req.params.phone.replace(/[^a-zA-Z0-9_-]/g, '');
+        // У статусі використовуємо той самий формат ключа, що і в clients Map.
+        const phone = normalizePhone(req.params.phone);
         const client = clients.get(phone);
         if (client && client.authInfo) {
             logger.log(`Сесія ${phone} активна`, LogLevels.Info, 'status');
@@ -651,7 +666,7 @@ app.get('/status/:phone', (req, res) => {
 // Видалення сесії
 app.delete('/sessiondelete/:phone', async (req, res) => {
     try {
-        const phone = req.params.phone.replace(/[^a-zA-Z0-9_-]/g, '');
+        const phone = normalizePhone(req.params.phone);
         const client = clients.get(phone);
 
         if (client) {
@@ -687,5 +702,7 @@ process.on('uncaughtException', (err) => {
 
 // Обробка обіцянок, які були відхилені
 process.on('unhandledRejection', (reason, promise) => {
-    logger.log(`Необроблена обіцянка: ${reason.message}\nPromise: ${promise}. Продовжую роботу сервера.`, LogLevels.Error, 'unhandledRejection');
+    // reason може бути не Error, тому безпечніше приводити до рядка.
+    const reasonText = reason?.message || String(reason);
+    logger.log(`Необроблена обіцянка: ${reasonText}\nPromise: ${promise}. Продовжую роботу сервера.`, LogLevels.Error, 'unhandledRejection');
 });
