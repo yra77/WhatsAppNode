@@ -32,6 +32,10 @@ fs.ensureDirSync(CACHE_DIR);
 // Всі активні клієнти та таймери
 const clients = new Map();
 const qrTimers = new Map();
+// Таймери відкладених повторних ініціалізацій, щоб не накопичувати дублікати для одного номера.
+const retryTimers = new Map();
+// Набір номерів, для яких у поточний момент вже виконується ініціалізація (guard від гонок).
+const initializingPhones = new Set();
 // Стан сесій для health-check та синхронізації з CRM/сервером.
 const sessionStatus = new Map();
 
@@ -45,6 +49,26 @@ function clearQrTimer(phoneNumber) {
         clearTimeout(qrTimers.get(phoneNumber));
         qrTimers.delete(phoneNumber);
     }
+}
+
+// Очищення таймера повторної ініціалізації для номера.
+function clearRetryTimer(phoneNumber) {
+    if (retryTimers.has(phoneNumber)) {
+        clearTimeout(retryTimers.get(phoneNumber));
+        retryTimers.delete(phoneNumber);
+    }
+}
+
+// Планування єдиної повторної ініціалізації без дублювань.
+function scheduleRetry(phoneNumber, lineId, reason = 'unknown', delayMs = 30000) {
+    const normalizedPhone = normalizePhone(phoneNumber);
+    clearRetryTimer(normalizedPhone);
+    const timer = setTimeout(() => {
+        retryTimers.delete(normalizedPhone);
+        createSession(normalizedPhone, lineId, { headersSent: true });
+    }, delayMs);
+    retryTimers.set(normalizedPhone, timer);
+    logger.log(`Заплановано повторну ініціалізацію для ${normalizedPhone} через ${delayMs / 1000} сек. Причина: ${reason}`, LogLevels.Warning, 'scheduleRetry');
 }
 
 // Функція для нормалізації телефонного номера (ключ для Map/роутів).
@@ -96,16 +120,18 @@ function setSessionHealth(phoneNumber, updates = {}) {
 // Формування поточного snapshot усіх сесій для віддачі в endpoint і синхронізації на сервер.
 function buildSessionHealthSnapshot() {
     const result = [];
+    const allPhones = new Set([...clients.keys(), ...sessionStatus.keys()]);
 
-    for (const [phone, client] of clients.entries()) {
+    for (const phone of allPhones) {
+        const client = clients.get(phone);
         const state = sessionStatus.get(phone) || {};
-        const healthy = state.healthy === true && state.hasUser === true && !!client?.info?.wid?.user;
+        const healthy = state.healthy === true && (state.hasUser === true || !!client?.info?.wid?.user);
 
         result.push({
             phone,
             status: healthy ? 1 : 0,
             healthy,
-            hasUser: state.hasUser === true,
+            hasUser: state.hasUser === true || !!client?.info?.wid?.user,
             state: state.state || 'unknown',
             lastUpdate: state.lastUpdate || Date.now()
         });
@@ -295,7 +321,7 @@ function initializeClient(phoneNumber, lineId) {
         client.initialize().catch((err) => {
             logger.log(`Помилка повторної ініціалізації для ${normalizedPhone}: ${err.message}. Спроба через 30 секунд.`, LogLevels.Error, 'initializeClient');
             clients.delete(normalizedPhone);
-            setTimeout(() => initializeClient(normalizedPhone, lineId), 30000);
+            scheduleRetry(normalizedPhone, lineId, `initializeClient: ${err.message}`);
         });
     }
 }
@@ -328,7 +354,7 @@ function handleQrEvent(client, phoneNumber, res) {
                     await removeSessionData(phoneNumber);
 
                     logger.log(`Час на сканування QR-коду для ${phoneNumber} минув`, LogLevels.Warning, 'handleQrEvent');
-                    setTimeout(() => createSession(phoneNumber, null, { headersSent: true }), 30000);
+                    scheduleRetry(phoneNumber, null, 'qr_timeout');
                 }
             }, 30000));
         } catch (err) {
@@ -346,6 +372,8 @@ function handleReadyEvent(phoneNumber, lineId, res = { headersSent: false }) {
             setSessionHealth(phoneNumber, { healthy: true, hasUser: true, state: 'ready' });
             await pushSessionHealthToServer('ready');
             clearQrTimer(phoneNumber);
+            clearRetryTimer(phoneNumber);
+            initializingPhones.delete(phoneNumber);
 
             const notifyUrl = `${process.env.BASE_URL}/whatsapp?handler=NotifyAuthSuccess&phone=${encodeURIComponent(phoneNumber)}&lineId=${encodeURIComponent(lineId || '')}`;
             const notifyRes = await fetch(notifyUrl);
@@ -372,7 +400,7 @@ function handleAuthenticatedEvent(phoneNumber) {
     return () => {
         logger.log(`Аутентифікація успішна: ${phoneNumber}`, LogLevels.Success, 'handleAuthenticatedEvent');
         // Авторизація пройдена, але повна готовність фіксується в ready.
-        setSessionHealth(phoneNumber, { healthy: true, state: 'authenticated' });
+        setSessionHealth(phoneNumber, { healthy: true, hasUser: true, state: 'authenticated' });
         clearQrTimer(phoneNumber);
     };
 }
@@ -388,8 +416,10 @@ function handleAuthFailureEvent(phoneNumber, res = { headersSent: false }) {
         }
         clients.delete(phoneNumber);
         clearQrTimer(phoneNumber);
+        clearRetryTimer(phoneNumber);
+        initializingPhones.delete(phoneNumber);
         await removeSessionData(phoneNumber);
-        setTimeout(() => createSession(phoneNumber, null, { headersSent: true }), 30000); // Повторна спроба
+        scheduleRetry(phoneNumber, null, 'auth_failure'); // Повторна спроба
     };
 }
 
@@ -401,7 +431,9 @@ function handleDisconnectedEvent(phoneNumber) {
         await pushSessionHealthToServer('disconnected');
         clients.delete(phoneNumber);
         clearQrTimer(phoneNumber);
-        setTimeout(() => initializeClient(phoneNumber, null), 30000); // Повторна ініціалізація
+        clearRetryTimer(phoneNumber);
+        initializingPhones.delete(phoneNumber);
+        scheduleRetry(phoneNumber, null, `disconnected:${reason}`); // Повторна ініціалізація
     };
 }
 
@@ -643,6 +675,19 @@ async function handleMessageEvent(message, phoneNumber) {
 function createSession(phoneNumber, lineId, res) {
     try {
         const normalizedPhone = normalizePhone(phoneNumber);
+        // Захист від дублюючих запусків: якщо сесія вже активна/в процесі — не стартуємо новий Chromium.
+        if (initializingPhones.has(normalizedPhone)) {
+            logger.log(`Пропущено дублюючий createSession для ${normalizedPhone}: ініціалізація вже виконується`, LogLevels.Warning, 'createSession');
+            return;
+        }
+        const existingClient = clients.get(normalizedPhone);
+        if (existingClient?.pupBrowser || existingClient?.info?.wid?.user) {
+            logger.log(`Пропущено createSession для ${normalizedPhone}: клієнт вже існує`, LogLevels.Info, 'createSession');
+            return;
+        }
+
+        initializingPhones.add(normalizedPhone);
+        clearRetryTimer(normalizedPhone);
         const cleanedClientId = normalizedPhone.replace(/[^a-zA-Z0-9_-]/g, '');
         const sessionPath = getSessionPath(normalizedPhone);
         const client = new Client({
@@ -681,9 +726,11 @@ function createSession(phoneNumber, lineId, res) {
         }).catch((err) => {
             logger.log(`Помилка ініціалізації клієнта WhatsApp для ${normalizedPhone}: ${err.message}. Спроба переініціалізації через 30 секунд.`, LogLevels.Error, 'createSession');
             clients.delete(normalizedPhone);
-            setTimeout(() => createSession(normalizedPhone, lineId, { headersSent: true }), 30000);
+            initializingPhones.delete(normalizedPhone);
+            scheduleRetry(normalizedPhone, lineId, `createSession: ${err.message}`);
         });
     } catch (err) {
+        initializingPhones.delete(normalizePhone(phoneNumber));
         logger.log(`Нештатна ситуація в createSession для ${phoneNumber}: ${err.message}. Продовжую роботу сервера.`, LogLevels.Error, 'createSession');
     }
 }
@@ -745,6 +792,10 @@ app.post('/registerwhatsapp', async (req, res) => {
             logger.log(`Сесія вже існує або активна для ${normalizedPhone}`, LogLevels.Info, 'register');
             return res.status(200).json({ status: 'connected', message: 'Сесія вже існує або активна', phone: normalizedPhone, lineId });
         }
+        if (initializingPhones.has(normalizedPhone)) {
+            logger.log(`Сесія для ${normalizedPhone} вже ініціалізується`, LogLevels.Info, 'register');
+            return res.status(202).json({ status: 'initializing', message: 'Сесія в процесі ініціалізації', phone: normalizedPhone, lineId });
+        }
 
         // Якщо лишилася "осиротіла" директорія без активного клієнта — очищаємо її і дозволяємо реєстрацію.
         if (fs.existsSync(sessionPath)) {
@@ -782,7 +833,7 @@ app.post('/sendmsg', async (req, res) => {
         const client = clients.get(normalizedFrom);
         if (!client) {
             logger.log(`Клієнт не підключений для ${normalizedFrom}. Спроба переініціалізації через 30 секунд.`, LogLevels.Warning, 'send');
-            setTimeout(() => createSession(normalizedFrom, null, { headersSent: true }), 30000); // Повторна спроба
+            scheduleRetry(normalizedFrom, null, 'send_without_client'); // Повторна спроба
             return res.status(404).json({ status: 'error', message: 'Клієнт не підключений' });
         }
 
@@ -824,12 +875,14 @@ app.get('/status/:phone', (req, res) => {
         // У статусі використовуємо той самий формат ключа, що і в clients Map.
         const phone = normalizePhone(req.params.phone);
         const client = clients.get(phone);
-        if (client && client.authInfo) {
+        const health = sessionStatus.get(phone);
+        const isConnected = !!client && (health?.healthy === true || !!client?.info?.wid?.user);
+        if (isConnected) {
             logger.log(`Сесія ${phone} активна`, LogLevels.Info, 'status');
-            res.json({ status: 'connected', phone, isAuthenticated: true });
+            res.json({ status: 'connected', phone, isAuthenticated: true, state: health?.state || 'ready' });
         } else {
             logger.log(`Сесія ${phone} не активна`, LogLevels.Warning, 'status');
-            res.json({ status: 'disconnected', phone, isAuthenticated: false });
+            res.json({ status: 'disconnected', phone, isAuthenticated: false, state: health?.state || 'disconnected' });
         }
     } catch (err) {
         logger.log(`Помилка в /status для ${req.params.phone}: ${err.message}. Продовжую роботу сервера.`, LogLevels.Error, 'status');
@@ -847,6 +900,8 @@ app.delete('/sessiondelete/:phone', async (req, res) => {
             await client.destroy().catch(err => logger.log(`Помилка при закритті сесії ${phone}: ${err.message}`, LogLevels.Error, 'sessiondelete'));
             clients.delete(phone);
             clearQrTimer(phone);
+            clearRetryTimer(phone);
+            initializingPhones.delete(phone);
             setSessionHealth(phone, { healthy: false, hasUser: false, state: 'deleted' });
             await pushSessionHealthToServer('deleted');
             logger.log(`Сесія видалена: ${phone}`, LogLevels.Info, 'session');
