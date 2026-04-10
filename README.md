@@ -1,73 +1,41 @@
 # WhatsAppNode
 
-Node.js сервіс інтеграції WhatsApp Web (Baileys) з CRM (ASP.NET webhook).
+Node.js сервіс інтеграції WhatsApp Web (`whatsapp-web.js`) з CRM (ASP.NET webhook).
 
-## Актуальний стан (оновлено 2026-04-09)
+## Актуальний стан (оновлено 2026-04-10)
 
-### Внесені зміни
+### Що змінено
 
-1. **Виправлено сценарій з `connection.close` кодом `405`, коли QR не повертався у фронт**:
-   - додано `pendingRegisterResponses` для збереження активної HTTP-відповіді `/registerwhatsapp`;
-   - при повторному підключенні (retry після `405`) QR або `success` тепер відправляються у той самий запит, якщо він ще відкритий;
-   - додано централізований helper `respondToPendingRegister(...)`, який безпечно відповідає клієнту та очищує pending-стан.
-2. **Покращено cleanup сесії**:
-   - під час `safelyDestroySession(...)` очищується pending-відповідь реєстрації для номера, щоб уникнути "висячих" response-обʼєктів.
-3. **Актуалізовано документацію**:
-   - прибрано неактуальні пояснення;
-   - додано окремий блок діагностики для помилки `405` і відсутності QR.
+1. **Перехід з Baileys на `whatsapp-web.js` + локальний Chromium**:
+   - основна робота сесій тепер побудована через `Client`/`LocalAuth` з `whatsapp-web.js`;
+   - використовується локальний браузер з шляху `./chromium/chrome.exe` (якщо файл існує);
+   - якщо локального Chromium немає, застосунок використовує браузерний рушій за замовчуванням бібліотеки.
+
+2. **Виправлено критичні помилки ключів сесій**:
+   - додано нормалізацію номера (`normalizePhone`) для єдиного ключа в `clients`;
+   - виправлено обробники `ready/auth/disconnect`, щоб передавати реальний номер телефону (а не `cleanedClientId`), інакше ламалась логіка notify/reconnect;
+   - виправлено `GET /status/:phone` та `DELETE /sessiondelete/:phone` для коректного пошуку активної сесії.
+
+3. **Стабільність і захист від edge-case**:
+   - у `unhandledRejection` додано безпечне перетворення `reason` у текст (бо це не завжди `Error`);
+   - у коді залишені пояснювальні коментарі в місцях, де були логічні помилки.
+
+4. **Оновлено залежності**:
+   - видалено Baileys-орієнтовані/неактуальні залежності;
+   - додано `whatsapp-web.js`;
+   - `package-lock.json` синхронізовано під актуальний `package.json`.
 
 ---
 
-## API
+## Вимоги
 
-### `POST /registerwhatsapp`
-Реєстрація/ініціалізація WhatsApp-сесії.
+- Node.js 18+
+- npm
+- `.env` файл
+- Chromium у папці проєкту (рекомендовано):
+  - `./chromium/chrome.exe`
 
-Body:
-```json
-{
-  "phone": "+380XXXXXXXXX",
-  "lineId": "crm-line-id"
-}
-```
-
-Відповіді:
-- `{"status":"qr","qr":"data:image/png;base64,..."}` — згенеровано QR;
-- `{"status":"success"}` — сесія підключена;
-- `{"status":"error","message":"..."}` — помилка.
-
-### `POST /sendmsg`
-Відправка повідомлення в WhatsApp.
-
-Body:
-```json
-{
-  "from": "+380XXXXXXXXX",
-  "to": "+380YYYYYYYYY",
-  "message": "Текст повідомлення",
-  "contentType": "text"
-}
-```
-
-Підтримувані `contentType`:
-- `text`
-- `image` (за наявності `filePath`)
-- `document` (за наявності `filePath`)
-
-### `DELETE /sessiondelete/:phone`
-Видаляє сесію номера.
-
-### `GET /whatsapp_health`
-Повертає health-статуси активних сесій:
-```json
-[
-  {
-    "phone": "+380XXXXXXXXX",
-    "status": 1
-  }
-]
-```
-де `status: 1` — сесія активна, `status: 0` — неактивна/неавторизована.
+> Якщо працюєте не на Windows, потрібно змінити шлях до Chromium у `index.js` під вашу ОС.
 
 ---
 
@@ -92,39 +60,60 @@ node index.js
 
 ---
 
-## Помилка `405` і чому QR міг не зʼявлятись
+## API
 
-### Що означає `405` у цьому проєкті
+### `POST /registerwhatsapp`
+Реєстрація/ініціалізація WhatsApp-сесії.
 
-У поточній інтеграції `connection.close` з кодом `405` зазвичай означає, що локальний `auth-state` невалідний/пошкоджений або сесія на стороні WhatsApp стала несумісною і потрібна нова QR-авторизація.
+Body:
+```json
+{
+  "phone": "+380XXXXXXXXX",
+  "lineId": "crm-line-id"
+}
+```
 
-### Чому раніше QR не доходив до UI
+Відповіді:
+- `{"status":"qr","qr":"data:image/png;base64,...","phone":"..."}` — згенеровано QR;
+- `{"status":"success","phone":"...","lineId":"..."}` — сесія підключена;
+- `{"status":"connected"}` — сесія вже існує;
+- `{"status":"error","message":"..."}` — помилка.
 
-Після `405` сервер очищав `auth_sessions` і запускав retry, але QR з retry-спроби інколи не повертався в первинний HTTP-запит `/registerwhatsapp`, через що у UI виглядало як "реєстрація зависла без QR".
+### `POST /sendmsg`
+Відправка повідомлення в WhatsApp.
 
-### Що тепер змінено
+Body:
+```json
+{
+  "from": "+380XXXXXXXXX",
+  "to": "+380YYYYYYYYY",
+  "message": "Текст повідомлення",
+  "contentType": "text",
+  "filePath": "C:/path/to/file.ext",
+  "bitrixMessageId": "crm-msg-id"
+}
+```
 
-QR/`success` можуть бути повернуті клієнту навіть якщо вони зʼявились вже після retry (поки HTTP-запит ще активний).
+Підтримувані `contentType`:
+- `text`
+- будь-який MIME-тип для медіа/документів, якщо передано `filePath`
 
-### Практичний чекліст
+### `GET /status/:phone`
+Повертає стан сесії для номера (`connected` / `disconnected`).
 
-1. Виклич `DELETE /sessiondelete/:phone` для проблемного номера.
-2. Перезапусти Node-процес.
-3. Повтори `POST /registerwhatsapp` з `phone` і `lineId`.
-4. Проскануй новий QR.
-5. Перевір `GET /whatsapp_health` — очікується `status: 1`.
+### `DELETE /sessiondelete/:phone`
+Видаляє активну сесію та локальні дані авторизації/кешу.
 
 ---
 
 ## Що ще треба зробити у проєкті
 
 1. Додати валідацію payload (`zod` або `joi`) для `/registerwhatsapp` і `/sendmsg`.
-2. Додати автотести:
-   - юніт-тести для `resolveRecipientJid`, `setSessionHealthy`, `setSessionHasUser`;
+2. Додати endpoint `GET /whatsapp_health` з узгодженим форматом для CRM-моніторингу.
+3. Додати автотести:
+   - юніт-тести для утиліт нормалізації номера та побудови шляхів;
    - інтеграційні тести endpoint-ів (`supertest`).
-3. Додати `rate limit` на API endpoint-и.
-4. Додати structured-логування та `requestId` для кореляції між Node і CRM.
-5. Додати endpoint ручної ресинхронізації сесії (без рестарту процесу).
-6. Додати production-runbook (`pm2/systemd`, автостарт, ротація логів).
-7. Додати базову авторизацію/секрет для API.
-8. Додати метрики (`/metrics` Prometheus) для спостереження за retry, 405, reconnect, send failures.
+4. Додати `rate limit` та базову авторизацію/секрет для API.
+5. Додати structured-логування + `requestId` для кореляції між Node і CRM.
+6. Додати runbook для продакшену (`pm2/systemd`, автостарт, ротація логів).
+7. Додати метрики (`/metrics` Prometheus) для спостереження за retry/disconnect/send-failures.
