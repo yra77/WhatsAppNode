@@ -48,6 +48,28 @@ function normalizePhone(phoneNumber) {
     return String(phoneNumber || '').trim();
 }
 
+// Перевіряє, чи JID належить персональному діалогу (контакт/Linked Identity Device).
+function isDirectUserJid(jid) {
+    return typeof jid === 'string' && (jid.endsWith('@c.us') || jid.endsWith('@lid'));
+}
+
+// Витягує ідентифікатор користувача з JID (підтримка @c.us та @lid).
+function extractUserIdFromJid(jid) {
+    if (typeof jid !== 'string') {
+        return '';
+    }
+    return jid.replace(/@(c\.us|lid)$/i, '');
+}
+
+// Намагається отримати людиночитний "номер/ID" відправника з Contact API.
+function resolveContactIdentifier(contact, fallbackJid = '') {
+    if (contact?.number) {
+        return String(contact.number);
+    }
+    const serialized = contact?.id?._serialized || contact?.id?.user || fallbackJid;
+    return extractUserIdFromJid(serialized);
+}
+
 // Оновлення health-стану для конкретної сесії.
 function setSessionHealth(phoneNumber, updates = {}) {
     const current = sessionStatus.get(phoneNumber) || {
@@ -479,19 +501,29 @@ function handleDisconnectedEvent(phoneNumber) {
 // }
 async function handleMessageEvent(message, phoneNumber) {
     try {
-        // Перевіряємо, чи повідомлення від індивідуального контакту (@c.us)
-        if (!message.from.endsWith('@c.us') || !message.to.endsWith('@c.us')) {
+        // Перевіряємо тип чату через Chat API, щоб не пропускати особисті повідомлення з @lid.
+        const chat = await message.getChat();
+        const isIndividualChat = !!chat && !chat.isGroup;
+        const fromJid = message.from || '';
+        const toJid = message.to || '';
+
+        // Ігноруємо лише групові/неперсональні чати.
+        if (!isIndividualChat || (!isDirectUserJid(fromJid) && !isDirectUserJid(toJid))) {
             logger.log(`Повідомлення від ${message.from} до ${message.to} пропущено: не є індивідуальним чатом`, LogLevels.Info, 'handleMessageEvent');
             return;
         }
-        // Перевіряємо, що повідомлення вхідне
-        if (message.from === `${phoneNumber}@c.us`) {
+
+        // Перевіряємо, що повідомлення вхідне (універсально через fromMe).
+        if (message.fromMe === true) {
             logger.log(`Повідомлення від ${message.from} до ${message.to} пропущено: це вихідне повідомлення`, LogLevels.Info, 'handleMessageEvent');
             return;
         }
 
-        const fromPhone = message.from.replace('@c.us', '');
-        const toPhone = message.to.replace('@c.us', '');
+        // Визначаємо відправника: для @lid пробуємо взяти contact.number, інакше лишаємо user-id.
+        const senderContact = await message.getContact();
+        const fromPhone = resolveContactIdentifier(senderContact, fromJid);
+        // Визначаємо отримувача: пріоритетно номер сесії, бо message.to може бути @lid.
+        const toPhone = normalizePhone(phoneNumber) || extractUserIdFromJid(toJid);
         const messageId = message.id.id;
         const timestamp = message.timestamp;
         const type = message.type;
@@ -562,7 +594,8 @@ async function handleMessageEvent(message, phoneNumber) {
                             [type]: mediaData
                         }],
                         metadata: {
-                            phone_number_id: phoneNumber
+                            phone_number_id: phoneNumber,
+                            receiver_id: toPhone
                         }
                     }
                 }]

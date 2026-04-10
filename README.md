@@ -7,42 +7,24 @@ Node.js сервіс інтеграції WhatsApp Web (`whatsapp-web.js`) з CR
 ### Поточне оточення
 - Node.js: `v24.11.1`
 - Пакування: `pkg@5.8.1`
-- Ціль пакування в проєкті: `node18-win-x64` (це нормально для `pkg@5.8.1`)
+- Ціль пакування в проєкті: `node18-win-x64`
 
 ### Що оновлено в останніх змінах
-1. У `index.js` додано облік актуального стану сесій (`sessionStatus`) та оновлення стану на подіях `qr`, `authenticated`, `ready`, `auth_failure`, `disconnected`, `sessiondelete`.
-2. Додано endpoint `GET /whatsapp_health` (сумісний формат із `index_old.js`): масив `[{ phone, status }]`, де `status: 1` — сесія жива, `status: 0` — неактивна.
-3. Додано опціональну синхронізацію стану сесій на зовнішній сервер:
-   - через змінну `.env`: `SESSION_HEALTH_PUSH_URL`
-   - push виконується при змінах стану сесії та періодично (раз на 60 секунд).
-4. README оновлено: прибрано неактуальні пункти, додано інструкції по health-моніторингу.
-
----
-
-## Пояснення щодо попередніх warning-ів `pkg`
-
-### 1) `Cannot include directory ... node_modules\puppeteer\.local-chromium`
-Це очікувана поведінка `pkg`: каталоги браузера Puppeteer не вбудовуються у `.exe` як snapshot-ресурси.
-
-Що робимо:
-- очищаємо dev-каталог `.local-chromium` через `npm run prepare:pkg`;
-- використовуємо локальний Chromium із `./chromium/chrome.exe` під час runtime (логіка вже є в `index.js`);
-- якщо потрібно, розповсюджуємо `chromium/` поруч з `whatsappserver3.exe`.
-
-### 2) `Babel parse has failed ... typed-query-selector/shim.d.ts`
-Це побічний warning під час проходу `pkg` по залежностях TypeScript declaration (`.d.ts`).
-На роботу runtime зазвичай не впливає.
-
-Що робити:
-- для перевірки запускати `npm run build:exe:debug`;
-- якщо `.exe` стартує і WhatsApp-сесія працює, warning можна вважати некритичним;
-- за потреби наступний крок — пін або оновлення дерева залежностей (`whatsapp-web.js`/`puppeteer`) після тесту сумісності.
+1. Виправлено обробку вхідних повідомлень у `handleMessageEvent` для нових WhatsApp ідентифікаторів `@lid`:
+   - перевірка індивідуального чату тепер робиться через `message.getChat()` + `chat.isGroup`;
+   - повідомлення від `@lid` більше не пропускаються з причиною «не є індивідуальним чатом».
+2. Додано helper-функції для коректної роботи з JID:
+   - `isDirectUserJid(jid)` — підтримка `@c.us` та `@lid`;
+   - `extractUserIdFromJid(jid)` — виділення user-id із JID;
+   - `resolveContactIdentifier(contact, fallbackJid)` — пріоритетно повертає номер контакту, а якщо його немає — user-id.
+3. Перевірку «вхідне/вихідне» змінено на `message.fromMe`, щоб уникнути помилкових пропусків при `@lid`.
+4. У payload webhook (`metadata`) додано `receiver_id`, щоб сервер отримував ідентифікатор отримувача навіть коли це `@lid`.
 
 ---
 
 ## Вимоги
 - Windows Server/Windows 10+ для `.exe`
-- Node.js 18+ (локально у вас зараз Node 24.11.1)
+- Node.js 18+
 - npm
 - `.env` файл
 - Chromium у папці проєкту (рекомендовано):
@@ -110,11 +92,14 @@ npm run build:exe:debug
 
 ## Що ще треба зробити в проєкті (next steps)
 1. Додати валідацію payload (`zod` або `joi`) для `/registerwhatsapp` і `/sendmsg`.
-2. Додати захист API:
+2. Уніфікувати формат ідентифікаторів у CRM:
+   - зберігати і `phone`, і `jid/userId`;
+   - додати мапінг `lid -> phone`, якщо в бізнес-логіці обов'язково потрібен саме номер телефону.
+3. Додати захист API:
    - `rate limit`;
    - секрет/токен між CRM і Node-сервісом.
-3. Додати structured logging + `requestId` для кореляції логів CRM/Node.
-4. Описати production runbook (`pm2/systemd`, автостарт, ротація логів, backup сесій).
-5. Додати метрики (`/metrics`, Prometheus): reconnect, auth failure, send failures, uptime.
+4. Додати structured logging + `requestId` для кореляції логів CRM/Node.
+5. Описати production runbook (`pm2/systemd`, автостарт, ротація логів, backup сесій).
+6. Додати метрики (`/metrics`, Prometheus): reconnect, auth failure, send failures, uptime.
 
 > Важливо: тести **не потрібно** створювати у репозиторії. За потреби дозволено запускати локальні перевірки лише під час розробки без додавання тестових файлів у git.
