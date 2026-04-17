@@ -1,49 +1,41 @@
 # WhatsAppNode
 
-Node.js сервіс інтеграції WhatsApp Web (`whatsapp-web.js`) з CRM (ASP.NET webhook).
+Node.js сервіс інтеграції WhatsApp Web (`whatsapp-web.js`) з CRM (ASP.NET webhook), підготовлений для стабільного запуску на CentOS Stream 8/9.
 
 ## Оновлено: 2026-04-17
 
-### Що зроблено в цій версії
-- Додано мережевий запуск через `APP_HOST` (за замовчуванням `0.0.0.0`) — сервіс доступний на CentOS ззовні за `http://<SERVER_IP>:PORT`.
-- Оновлено інструкцію запуску під CentOS (Node.js + Chrome/Chromium + firewall + systemd).
-- Додано технічний файл `PROJECT_MAINTENANCE_NOTES.md` для фіксації виконаних змін і backlog.
+## Що актуально зараз
+- Сервіс запускається на `APP_HOST` (дефолтно `0.0.0.0`) для зовнішнього доступу на CentOS.
+- Додано `.env.example` з актуальними змінними оточення.
+- Підтримано автопошук Chrome/Chromium у Linux/CentOS (`CHROME_BIN` можна задати явно).
+- В `PROJECT_MAINTENANCE_NOTES.md` ведеться актуальний backlog робіт.
 
 ## Вимоги
 - Node.js 18+ (рекомендовано LTS 20/22)
 - npm
-- Chromium/Google Chrome
-- `.env`
+- Google Chrome або Chromium
+- Linux бібліотеки для headless Chromium
 
-## Налаштування `.env`
-```env
-# Порт API
-PORT=3000
-
-# На якій адресі слухати HTTP-сервер.
-# Для CentOS/VPS використовуйте 0.0.0.0, щоб був доступ з мережі.
-APP_HOST=0.0.0.0
-
-# URL вашого CRM/бекенду для webhook-викликів
-BASE_URL=http://127.0.0.1:5000
-
-# Каталог логів
-LOG_DIR=Logs
-
-# Опційно: URL для отримання актуального стану всіх сесій (POST JSON)
-SESSION_HEALTH_PUSH_URL=
-
-# Опційно: явний шлях до Chrome/Chromium (особливо актуально для Linux/CentOS)
-CHROME_BIN=/usr/bin/google-chrome-stable
-```
-
-## Локальний запуск
+## Швидкий старт
 ```bash
 npm install
+cp .env.example .env
 node index.js
 ```
 
-## Запуск на CentOS (Stream 8/9)
+## Налаштування `.env`
+Заповніть змінні у файлі `.env` (приклад у `.env.example`):
+
+```env
+PORT=3000
+APP_HOST=0.0.0.0
+BASE_URL=http://127.0.0.1:5000
+LOG_DIR=Logs
+SESSION_HEALTH_PUSH_URL=
+CHROME_BIN=/usr/bin/google-chrome-stable
+```
+
+## Запуск на CentOS Stream 8/9
 
 ### 1) Встановити Node.js LTS
 ```bash
@@ -61,26 +53,34 @@ sudo dnf install -y \
   libxkbcommon pango alsa-lib gtk3 xorg-x11-fonts-Type1 xorg-x11-fonts-misc
 ```
 
-### 3) Встановити Chrome/Chromium і вказати `CHROME_BIN`
-- або системний пакет `google-chrome-stable`/`chromium`
-- або вручну встановлений браузер з повним шляхом у `.env`
+### 3) Встановити браузер
+Один із варіантів:
+- `google-chrome-stable`
+- `chromium` / `chromium-browser`
+
+Після цього перевірте шлях (`which google-chrome-stable` або `which chromium`) і встановіть `CHROME_BIN` у `.env`, якщо автопошук не спрацював.
 
 ### 4) Запустити сервіс
 ```bash
 npm install
+cp .env.example .env
 node index.js
 ```
 
-Після запуску сервіс буде доступний за адресою:
+Після запуску API доступний за адресою:
 - `http://<SERVER_IP>:3000` (або ваш `PORT`)
 
-> Приклад: якщо IP сервера `192.168.1.50`, тоді виклик: `http://192.168.1.50:3000/status/<phone>`.
+Приклад:
+- `http://192.168.1.50:3000/status/<phone>`
 
 ### 5) Відкрити порт у firewall (за потреби)
 ```bash
 sudo firewall-cmd --permanent --add-port=3000/tcp
 sudo firewall-cmd --reload
 ```
+
+### 6) (Опційно) SELinux policy
+Якщо увімкнений SELinux і є блокування мережевих/файлових дій Node.js — перевірте `audit.log` та додайте дозволи політикою.
 
 ## Рекомендований запуск як systemd service
 ```ini
@@ -95,6 +95,7 @@ ExecStart=/usr/bin/node /opt/WhatsAppNode/index.js
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
+EnvironmentFile=/opt/WhatsAppNode/.env
 
 [Install]
 WantedBy=multi-user.target
@@ -111,12 +112,10 @@ sudo systemctl status whatsappnode
 - `POST /registerwhatsapp` — реєстрація/ініціалізація WhatsApp-сесії.
 - `POST /sendmsg` — відправка повідомлення.
 - `GET /status/:phone` — стан сесії (`connected`/`disconnected`).
-- `GET /whatsapp_health` — масив станів сесій (`[{ phone, status }]`).
-- `DELETE /sessiondelete/:phone` — видалення сесії і локальних auth/cache даних.
+- `GET /whatsapp_health` — масив станів сесій (`[{ phone, status, healthy, hasUser, state, lastUpdate }]`).
+- `DELETE /sessiondelete/:phone` — видалення сесії та локальних auth/cache даних.
 
-## Важливо про адресу сервісу
-- Раніше часто використовували `localhost` (інколи з помилкою `lcalhost`).
-- Для зовнішнього доступу на CentOS потрібно:
-  1. `APP_HOST=0.0.0.0`
-  2. відкритий порт у firewall/security group
-  3. викликати сервіс за `http://<SERVER_IP>:<PORT>`
+## Критично для зовнішнього доступу
+1. `APP_HOST=0.0.0.0`
+2. Відкритий TCP порт у firewall/security group
+3. Виклики робіть на `http://<SERVER_IP>:<PORT>`, не на `localhost`
