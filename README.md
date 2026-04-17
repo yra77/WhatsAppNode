@@ -1,22 +1,23 @@
 # WhatsAppNode
 
-Node.js сервіс інтеграції WhatsApp Web (`whatsapp-web.js`) з CRM (ASP.NET webhook), підготовлений для стабільного запуску на CentOS Stream 8/9.
+Node.js сервіс інтеграції WhatsApp Web (`whatsapp-web.js`) з CRM (ASP.NET webhook), адаптований для запуску на CentOS Stream 8/9 і в Docker-контейнері.
 
 ## Оновлено: 2026-04-17
 
 ## Що актуально зараз
 - Сервіс запускається на `APP_HOST` (дефолтно `0.0.0.0`) для зовнішнього доступу на CentOS.
-- Додано `.env.example` з актуальними змінними оточення.
+- Є `.env.example` з актуальними змінними оточення.
 - Підтримано автопошук Chrome/Chromium у Linux/CentOS (`CHROME_BIN` можна задати явно).
-- В `PROJECT_MAINTENANCE_NOTES.md` ведеться актуальний backlog робіт.
+- Додано `Dockerfile` та `.dockerignore` для контейнерного запуску.
+- В `PROJECT_MAINTENANCE_NOTES.md` ведеться актуальний стан змін.
 
-## Вимоги
+## Вимоги (нативний запуск)
 - Node.js 18+ (рекомендовано LTS 20/22)
 - npm
 - Google Chrome або Chromium
-- Linux бібліотеки для headless Chromium
+- Linux-бібліотеки для headless Chromium
 
-## Швидкий старт
+## Швидкий старт (нативно)
 ```bash
 npm install
 cp .env.example .env
@@ -35,7 +36,44 @@ SESSION_HEALTH_PUSH_URL=
 CHROME_BIN=/usr/bin/google-chrome-stable
 ```
 
-## Запуск на CentOS Stream 8/9
+---
+
+## Запуск у Docker (рекомендовано для CentOS)
+
+### 1) Збірка образу
+```bash
+docker build -t whatsappnode:latest .
+```
+
+### 2) Підготовка `.env`
+```bash
+cp .env.example .env
+# Відредагуйте BASE_URL, PORT, інші змінні під ваше оточення
+```
+
+### 3) Запуск контейнера
+```bash
+docker run -d --name whatsappnode \
+  --env-file .env \
+  -p 3000:3000 \
+  -v whatsappnode_auth:/app/.wwebjs_auth \
+  -v whatsappnode_cache:/app/.wwebjs_cache \
+  -v whatsappnode_logs:/app/Logs \
+  --restart unless-stopped \
+  whatsappnode:latest
+```
+
+### 4) Перевірка
+```bash
+docker logs -f whatsappnode
+curl http://127.0.0.1:3000/whatsapp_health
+```
+
+> Важливо: сесії WhatsApp зберігаються у volume (`.wwebjs_auth`, `.wwebjs_cache`), тому при перезапуску контейнера повторна авторизація зазвичай не потрібна.
+
+---
+
+## Запуск на CentOS Stream 8/9 (без Docker)
 
 ### 1) Встановити Node.js LTS
 ```bash

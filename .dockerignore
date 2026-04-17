@@ -1,0 +1,15 @@
+# Node modules створюються всередині образу.
+node_modules
+npm-debug.log*
+
+# Локальні environment-файли не включаємо в образ.
+.env
+
+# Тимчасові/важкі runtime-дані не повинні потрапляти в image context.
+.wwebjs_auth
+.wwebjs_cache
+Logs
+
+# Службові файли git.
+.git
+.gitignore
