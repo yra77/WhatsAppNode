@@ -973,10 +973,14 @@ app.get('/whatsapp_health', (req, res) => {
     }
 });
 
-// Запуск сервера
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-    logger.log(`WhatsApp Multi Session Server запущено на порті ${PORT}`, LogLevels.Info, 'server');
+// Запуск HTTP-сервера:
+// APP_HOST=0.0.0.0 дозволяє приймати запити з мережі (актуально для CentOS/VPS),
+// APP_HOST=127.0.0.1 залишає доступ лише локально.
+const PORT = Number(process.env.PORT) || 3000;
+const APP_HOST = process.env.APP_HOST || process.env.HOST || '0.0.0.0';
+app.listen(PORT, APP_HOST, async () => {
+    const displayHost = APP_HOST === '0.0.0.0' ? '<SERVER_IP>' : APP_HOST;
+    logger.log(`WhatsApp Multi Session Server запущено: http://${displayHost}:${PORT}`, LogLevels.Info, 'server');
     // Періодична синхронізація стану сесій на зовнішній сервер (раз на 60 секунд).
     setInterval(() => {
         pushSessionHealthToServer('periodic').catch((err) => {
