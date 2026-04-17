@@ -28,14 +28,14 @@ Node.js сервіс інтеграції WhatsApp Web (`whatsapp-web.js`) з CR
 ---
 
 ## Вимоги
-- Windows Server/Windows 10+ для `.exe`
-- Node.js 18+
+- Node.js 18+ (рекомендовано LTS)
 - npm
 - `.env` файл
-- Chromium у папці проєкту (рекомендовано):
-  - `./chromium/chrome.exe`
+- Chromium/Google Chrome (локальний або системний)
+  - Windows: `./chromium/chrome.exe` (або системний Chrome)
+  - Linux/CentOS: системний `google-chrome`/`chromium` або шлях через `CHROME_BIN`
 
-> Якщо працюєте не на Windows, змініть шлях до Chromium у `index.js`.
+> У `index.js` додано кросплатформений пошук Chromium: `CHROME_BIN` / `PUPPETEER_EXECUTABLE_PATH` -> локальний `./chromium/*` -> системні Linux-шляхи.
 
 ---
 
@@ -48,6 +48,8 @@ BASE_URL=http://localhost:5000
 LOG_DIR=Logs
 # Опційно: URL для отримання актуального стану всіх сесій (POST JSON).
 SESSION_HEALTH_PUSH_URL=
+# Опційно: явний шлях до Chrome/Chromium (корисно для CentOS/Linux).
+CHROME_BIN=
 ```
 
 ---
@@ -67,6 +69,35 @@ npm run build:exe
 ```bash
 npm run build:exe:debug
 ```
+
+---
+
+## Запуск на CentOS (7/8/9 Stream)
+1. **Встановити Node.js LTS (18/20/22) і базові утиліти**.
+2. **Встановити залежності Chromium для headless-режиму** (приклад для CentOS Stream/RHEL-сімейства):
+   ```bash
+   sudo dnf install -y \
+     nss atk cups-libs libdrm libXcomposite libXdamage libXrandr libgbm \
+     libxkbcommon pango alsa-lib gtk3 xorg-x11-fonts-Type1 xorg-x11-fonts-misc
+   ```
+3. **Встановити Chromium або Google Chrome**:
+   - або через пакетний менеджер (якщо доступний у вашому репозиторії),
+   - або передати явний шлях у `.env`:
+   ```env
+   CHROME_BIN=/usr/bin/google-chrome-stable
+   ```
+4. **Запустити сервіс напряму через Node.js** (не `.exe`):
+   ```bash
+   npm install
+   node index.js
+   ```
+
+> Для CentOS рекомендовано запуск через `systemd` або `pm2`, а не через `pkg`-бінарник Windows.
+
+## Що саме змінено в коді для CentOS
+- Додано кросплатформений пошук бінарника браузера (`resolveChromePath`) із підтримкою Linux/CentOS шляхів.
+- Додано підтримку env-перемінних `CHROME_BIN` та `PUPPETEER_EXECUTABLE_PATH`.
+- Додано додатковий Chromium-параметр `--disable-software-rasterizer` для більш стабільного headless-запуску на серверних Linux.
 
 ---
 

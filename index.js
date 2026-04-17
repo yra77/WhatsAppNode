@@ -4,14 +4,50 @@ const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const fs = require('fs-extra');
 const path = require('path');
+const os = require('os');
 const fetch = require('node-fetch');
 const { Logger: logger, LogLevels } = require('./logger');
 const app = express();
 
-// Шлях до локального Chromium у корені проєкту (Windows-бінарник).
-// Якщо файла немає — використовуємо Chromium/Puppeteer за замовчуванням бібліотеки.
-const localChromePath = path.join(process.cwd(), 'chromium', 'chrome.exe');
-const chromePath = fs.existsSync(localChromePath) ? localChromePath : undefined;
+// Кросплатформений резолвер шляху до Chromium/Chrome (Windows + Linux/CentOS).
+// Пріоритет: явний env -> локальний бінарник у проєкті -> системні шляхи Linux.
+function resolveChromePath() {
+    // 1) Дозволяємо явно передати шлях через env для prod/CI.
+    const envChromePath = process.env.CHROME_BIN || process.env.PUPPETEER_EXECUTABLE_PATH;
+    if (envChromePath && fs.existsSync(envChromePath)) {
+        return envChromePath;
+    }
+
+    // 2) Локальні бінарники в репозиторії (зручно для Windows-оточення).
+    const localCandidates = [
+        path.join(process.cwd(), 'chromium', 'chrome.exe'),
+        path.join(process.cwd(), 'chromium', 'chrome')
+    ];
+    const localMatch = localCandidates.find(candidate => fs.existsSync(candidate));
+    if (localMatch) {
+        return localMatch;
+    }
+
+    // 3) Типові системні шляхи для Linux/CentOS.
+    if (os.platform() === 'linux') {
+        const linuxCandidates = [
+            '/usr/bin/google-chrome-stable',
+            '/usr/bin/google-chrome',
+            '/usr/bin/chromium-browser',
+            '/usr/bin/chromium',
+            '/usr/lib64/chromium-browser/chromium-browser'
+        ];
+        const linuxMatch = linuxCandidates.find(candidate => fs.existsSync(candidate));
+        if (linuxMatch) {
+            return linuxMatch;
+        }
+    }
+
+    // 4) Якщо нічого не знайдено — whatsapp-web.js спробує дефолт Puppeteer.
+    return undefined;
+}
+
+const chromePath = resolveChromePath();
 
 app.use(express.json());
 
@@ -252,8 +288,10 @@ async function initializeRegisteredSessions() {
                             '--disable-accelerated-2d-canvas',
                             '--no-first-run',
                             '--no-zygote',
-                            '--single-process',   // Sometimes helps on Windows
-                            '--disable-background-timer-throttling']
+                            '--single-process',   // Інколи допомагає стабільності запуску Chromium.
+                            '--disable-background-timer-throttling',
+                            '--disable-software-rasterizer' // Додатковий флаг для headless/Linux-серверів.
+                        ]
                     }
                 });
 
@@ -303,8 +341,10 @@ function initializeClient(phoneNumber, lineId) {
                     '--disable-accelerated-2d-canvas',
                     '--no-first-run',
                     '--no-zygote',
-                    '--single-process',   // Sometimes helps on Windows
-                    '--disable-background-timer-throttling']
+                    '--single-process',   // Інколи допомагає стабільності запуску Chromium.
+                    '--disable-background-timer-throttling',
+                    '--disable-software-rasterizer' // Додатковий флаг для headless/Linux-серверів.
+                ]
             }
         });
 
@@ -702,8 +742,10 @@ function createSession(phoneNumber, lineId, res) {
                     '--disable-accelerated-2d-canvas',
                     '--no-first-run',
                     '--no-zygote',
-                    '--single-process',   // Sometimes helps on Windows
-                    '--disable-background-timer-throttling']
+                    '--single-process',   // Інколи допомагає стабільності запуску Chromium.
+                    '--disable-background-timer-throttling',
+                    '--disable-software-rasterizer' // Додатковий флаг для headless/Linux-серверів.
+                ]
             }
         });
         clients.set(normalizedPhone, client);
