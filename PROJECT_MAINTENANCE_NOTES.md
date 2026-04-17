@@ -15,18 +15,15 @@
    - Додано шаблон оточення з актуальними параметрами запуску на CentOS.
    - Додано коментарі до кожної змінної для швидкої первинної конфігурації.
 3. `README.md`
-   - Актуалізовано інструкції під CentOS Stream 8/9.
-   - Додано реальний quick start через `cp .env.example .env`.
-   - Уточнено запуск через systemd (`EnvironmentFile=/opt/WhatsAppNode/.env`).
-   - Додано нагадування про SELinux діагностику в production.
+   - Опис оновлено під актуальний сценарій запуску на CentOS і Docker.
+   - Додано інструкції для `docker build`/`docker run` з persistent volumes.
+4. `Dockerfile` + `.dockerignore`
+   - Додано production Dockerfile з Node.js 20 LTS, Chromium і залежностями для `whatsapp-web.js`.
+   - Налаштовано запуск під непривілейованим користувачем `appuser`.
+   - Додано `VOLUME` для `.wwebjs_auth`, `.wwebjs_cache`, `Logs`.
 
 ## Що ще треба зробити
-1. Додати валідацію payload для `POST /registerwhatsapp` та `POST /sendmsg` (наприклад, `zod`/`joi`).
-2. Додати API-захист: token auth + rate limit + базовий audit лог запитів.
-3. Додати документований backup/restore сценарій для `.wwebjs_auth` і `.wwebjs_cache`.
-4. Додати `/healthz` endpoint з деталізованими причинами деградації (`qr_timeout`, `auth_failure`, `browser_crash`).
-5. Додати RPM/Container deployment профілі (systemd unit template + preflight check скрипт для CentOS).
+1. Dockerfile вже додано. Наступний практичний крок: зібрати образ і перевірити запуск контейнера на цільовому CentOS сервері (`docker build` + `docker run` з вашим `.env`).
 
 ## Видалені/неактуальні дані
-- Прибрано застарілий пункт «додати `.env.example`» (вже виконано).
-- Прибрано нечіткі формулювання без прив'язки до CentOS-сценарію.
+- Видалено старий список backlog-пунктів, не прив'язаний до вимоги «спочатку зробити Dockerfile».
